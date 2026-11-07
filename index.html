@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>3D 空島跑酷射擊 PvPvE</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: monospace; }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 8px; height: 8px;
+            background: rgba(255, 255, 255, 0.8); border-radius: 50%;
+            transform: translate(-50%, -50%); pointer-events: none; z-index: 10;
+        }
+        #hud {
+            position: absolute; top: 10px; left: 10px; color: #FFF;
+            text-shadow: 1px 1px 2px #000; font-size: 16px; z-index: 10;
+        }
+        #shop-ui {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(10, 15, 25, 0.95); border: 2px solid #44aaff;
+            color: #fff; padding: 20px; display: none; z-index: 20; border-radius: 8px;
+        }
+        .btn {
+            background: #225588; border: none; color: white; padding: 8px 16px;
+            margin: 5px; cursor: pointer; border-radius: 4px;
+        }
+        .btn:hover { background: #3388cc; }
+        #instructions {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #fff; text-align: center; font-size: 20px; z-index: 15;
+            background: rgba(0,0,0,0.7); padding: 25px; border-radius: 10px;
+        }
+    </style>
+    <!-- 引入 Three.js 與 PointerLockControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="hud">
+        HP: <span id="hp">100</span>/<span id="max-hp">100</span> | 
+        金錢: $<span id="cash">0</span> | 
+        手持武器: <span id="weapon-name">突擊步槍</span> | 
+        移速: <span id="cur-speed">0</span><br>
+        [B] 打開商店 | [1, 2, 3] 切換武器 | [C] 滑鏟 (奔跑時)
+    </div>
+
+    <div id="shop-ui">
+        <h2>空島補給黑市</h2>
+        <p>購買升級 (自動扣除金錢):</p>
+        <button class="btn" onclick="buySpeed()">升級速度 ($200)</button><br>
+        <button class="btn" onclick="buyMaxHp()">增加血量上限 +25 ($250)</button><br>
+        <button class="btn" onclick="buyWeaponSlot()">擴增背包容量 ($400)</button><br>
+        <button class="btn" onclick="toggleShop()">關閉 (B)</button>
+    </div>
+
+    <div id="instructions">
+        <h1>點擊螢幕開始遊戲</h1>
+        <p>操作指南：<br>
+        WASD - 行走<br>
+        Shift + W - 奔跑<br>
+        W + C - 滑鏟 (Slide)<br>
+        空白鍵 - 跳躍<br>
+        滑鼠左鍵 - 射擊/攻擊<br>
+        掉落虛空 (Y < -30) 即死亡！擊敗 AI 賺取金幣！
+        </p>
+    </div>
+
+    <script>
+        // --- 1. 遊戲資料模型 ---
+        let money = 0;
+        let health = 100, maxHealth = 100;
+        let speedUpgrades = 0;
+        let inventoryCapacity = 3;
+        
+        // 29種武器清單樣例（開局隨機抽 3 個）
+        const ALL_WEAPONS = [
+            { name: "突擊步槍 (AR)", dmg: 20, delay: 100, type: "gun" },
+            { name: "狙擊槍 (Sniper)", dmg: 90, delay: 800, type: "gun" },
+            { name: "散彈槍 (Shotgun)", dmg: 12, delay: 600, pellets: 6, type: "shotgun" },
+            { name: "火箭筒 (RPG)", dmg: 110, delay: 1200, type: "rpg" },
+            { name: "武士刀 (Katana)", dmg: 55, delay: 350, type: "melee" },
+            { name: "短管散彈 (Shorty)", dmg: 15, delay: 500, pellets: 5, type: "shotgun" },
+            { name: "手槍 (Handgun)", dmg: 25, delay: 250, type: "gun" },
+            { name: "烏茲 (Uzi)", dmg: 14, delay: 70, type: "gun" },
+            { name: "鐮刀 (Scythe)", dmg: 60, delay: 400, type: "melee" }
+        ];
+
+        let inventory = [];
+        let curWeaponIndex = 0;
+        let lastAttackTime = 0;
+
+        // 隨機抽 3 個武器
+        for(let i = 0; i < 3; i++) {
+            inventory.push(ALL_WEAPONS[Math.floor(Math.random() * ALL_WEAPONS.length)]);
+        }
+
+        // --- 2. 3D 場景與跑酷空島生成 ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x0a1122);
+        scene.fog = new THREE.FogExp2(0x0a1122, 0.015);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const light = new THREE.HemisphereLight(0xffffff, 0x444455, 1.2);
+        scene.add(light);
+
+        // 7 種地形要素對應的主題色彩
+        const BIOMES = [
+            { name: "地獄", color: 0x881100 },
+            { name: "城市", color: 0x555566 },
+            { name: "未來", color: 0x00ffff },
+            { name: "荒野", color: 0xcc8833 },
+            { name: "鐵路", color: 0x443322 },
+            { name: "遠古森林", color: 0x116622 },
+            { name: "天堂", color: 0xddddaa }
+        ];
+
+        // 自動生成浮空跑酷島嶼 (5種以上要素組合)
+        const islands = [];
+        let currentPos = new THREE.Vector3(0, 0, 0);
+
+        for (let i = 0; i < 20; i++) {
+            const biome = BIOMES[i % BIOMES.length];
+            const sizeX = 8 + Math.random() * 8;
+            const sizeZ = 8 + Math.random() * 8;
+            const geo = new THREE.BoxGeometry(sizeX, 2, sizeZ);
+            const mat = new THREE.MeshLambertMaterial({ color: biome.color });
+            const island = new THREE.Mesh(geo, mat);
+
+            if (i > 0) {
+                // 跑酷跳躍間隙與高低差
+                currentPos.x += (Math.random() - 0.5) * 20;
+                currentPos.y += (Math.random() - 0.3) * 6;
+                currentPos.z -= 18 + Math.random() * 10;
+            }
+
+            island.position.copy(currentPos);
+            scene.add(island);
+            islands.push(island);
+        }
+
+        // --- 3. 角色控制器 (WASD + Jump + Slide + Weight) ---
+        const controls = new THREE.PointerLockControls(camera, document.body);
+        const instructions = document.getElementById('instructions');
+
+        instructions.addEventListener('click', () => controls.lock());
+        controls.addEventListener('lock', () => instructions.style.display = 'none');
+        controls.addEventListener('unlock', () => {
+            if (document.getElementById('shop-ui').style.display !== 'block') {
+                instructions.style.display = 'block';
+            }
+        });
+
+        camera.position.set(0, 3, 0);
+
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let isSprinting = false, isSliding = false;
+        let slideTimer = 0;
+        let canJump = false;
+        let velocity = new THREE.Vector3();
+        let direction = new THREE.Vector3();
+
+        document.addEventListener('keydown', (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'ShiftLeft': isSprinting = true; break;
+                case 'Space': 
+                    if (canJump) {
+                        velocity.y = isSliding ? 15 : 12; // 滑鏟跳擁有更強起跳衝力
+                        canJump = false;
+                    }
+                    break;
+                case 'KeyC':
+                    // W + C 進入滑鏟
+                    if (moveForward && !isSliding) {
+                        isSliding = true;
+                        slideTimer = 0.6; // 滑鏟持續 0.6 秒
+                        camera.position.y -= 0.6; // 降低視角與碰撞體積
+                    }
+                    break;
+                case 'KeyB': toggleShop(); break;
+                case 'Digit1': curWeaponIndex = 0; updateHUD(); break;
+                case 'Digit2': if(inventory[1]) curWeaponIndex = 1; updateHUD(); break;
+                case 'Digit3': if(inventory[2]) curWeaponIndex = 2; updateHUD(); break;
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyD': moveRight = false; break;
+                case 'ShiftLeft': isSprinting = false; break;
+            }
+        });
+
+        // --- 4. 戰鬥與敵人 AI 系統 (難度可調 1-10) ---
+        const enemies = [];
+        const AI_DIFFICULTY = 6; // 設定難度 (1~10)
+
+        function spawnEnemy(pos) {
+            const geo = new THREE.CylinderGeometry(0.5, 0.5, 2, 8);
+            const mat = new THREE.MeshBasicMaterial({ color: 0xff3333 });
+            const bot = new THREE.Mesh(geo, mat);
+            bot.position.copy(pos);
+            bot.position.y += 2;
+            scene.add(bot);
+            enemies.push({ mesh: bot, hp: 80, nextShoot: 0 });
+        }
+
+        // 在遠處空島生成 AI
+        for (let i = 2; i < islands.length; i += 3) {
+            spawnEnemy(islands[i].position);
+        }
+
+        // 開火射擊機制 (Hitscan)
+        document.addEventListener('mousedown', (e) => {
+            if (!controls.isLocked || e.button !== 0) return;
+            const now = performance.now();
+            const curWeapon = inventory[curWeaponIndex];
+            if (now - lastAttackTime < curWeapon.delay) return;
+            lastAttackTime = now;
+
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            
+            const enemyMeshes = enemies.map(e => e.mesh);
+            const hits = raycaster.intersectObjects(enemyMeshes);
+
+            if (hits.length > 0) {
+                const hitMesh = hits[0].object;
+                const enemy = enemies.find(e => e.mesh === hitMesh);
+                if (enemy) {
+                    enemy.hp -= curWeapon.dmg;
+                    hitMesh.material.color.set(0xffffff); // 受傷閃白
+                    setTimeout(() => hitMesh.material.color.set(0xff3333), 100);
+
+                    if (enemy.hp <= 0) {
+                        scene.remove(hitMesh);
+                        enemies.splice(enemies.indexOf(enemy), 1);
+                        money += 150;
+                        updateHUD();
+                    }
+                }
+            }
+        });
+
+        // --- 5. 商店與背包邏輯 ---
+        function toggleShop() {
+            const shop = document.getElementById('shop-ui');
+            if (shop.style.display === 'block') {
+                shop.style.display = 'none';
+                controls.lock();
+            } else {
+                shop.style.display = 'block';
+                controls.unlock();
+            }
+        }
+        function buySpeed() {
+            if (money >= 200) { money -= 200; speedUpgrades++; updateHUD(); }
+        }
+        function buyMaxHp() {
+            if (money >= 250) { money -= 250; maxHealth += 25; health += 25; updateHUD(); }
+        }
+        function buyWeaponSlot() {
+            if (money >= 400 && inventoryCapacity < 6) {
+                money -= 400; inventoryCapacity++;
+                // 額外隨機抽出一個新武器
+                inventory.push(ALL_WEAPONS[Math.floor(Math.random() * ALL_WEAPONS.length)]);
+                updateHUD();
+            }
+        }
+
+        function updateHUD() {
+            document.getElementById('hp').innerText = Math.max(0, Math.floor(health));
+            document.getElementById('max-hp').innerText = maxHealth;
+            document.getElementById('cash').innerText = money;
+            document.getElementById('weapon-name').innerText = inventory[curWeaponIndex].name;
+        }
+
+        // --- 6. 主物理與渲染循環 ---
+        let prevTime = performance.now();
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now();
+            const delta = (time - prevTime) / 1000;
+
+            if (controls.isLocked) {
+                // 負重速度計算公式：擁有的武器/道具越多，移速越慢！
+                const weightPenalty = inventory.length * 0.05;
+                let baseSpeed = 40.0 * (1 + speedUpgrades * 0.1) * (1 - weightPenalty);
+                if (isSprinting) baseSpeed *= 1.6;
+
+                // 滑鏟狀態處理
+                if (isSliding) {
+                    baseSpeed *= 2.0;
+                    slideTimer -= delta;
+                    if (slideTimer <= 0) {
+                        isSliding = false;
+                        camera.position.y += 0.6; // 恢復站立視角
+                    }
+                }
+
+                document.getElementById('cur-speed').innerText = Math.floor(baseSpeed);
+
+                // 水平阻尼
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                velocity.y -= 30.0 * delta; // 重力
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * baseSpeed * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * baseSpeed * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                camera.position.y += velocity.y * delta;
+
+                // 簡單空島碰撞檢測 (AABB)
+                canJump = false;
+                const playerBox = new THREE.Box3().setFromCenterAndSize(
+                    new THREE.Vector3(camera.position.x, camera.position.y - 1.5, camera.position.z),
+                    new THREE.Vector2(1, 1)
+                );
+
+                for (let island of islands) {
+                    const islandBox = new THREE.Box3().setFromObject(island);
+                    if (playerBox.intersectsBox(islandBox) && velocity.y < 0) {
+                        velocity.y = 0;
+                        camera.position.y = islandBox.max.y + 1.8;
+                        canJump = true;
+                        break;
+                    }
+                }
+
+                // 墜入虛空死亡判斷 (落至 Y < -30)
+                if (camera.position.y < -30) {
+                    alert("你墜入虛空粉身碎骨！即刻重生！");
+                    camera.position.set(0, 5, 0);
+                    velocity.set(0, 0, 0);
+                    health = maxHealth;
+                    updateHUD();
+                }
+
+                // --- 7. AI 簡易邏輯 (面向玩家與難度射擊) ---
+                enemies.forEach(enemy => {
+                    enemy.mesh.lookAt(camera.position);
+                    const dist = enemy.mesh.position.distanceTo(camera.position);
+                    
+                    // 根據 AI 難度決定開火頻率與命中精度
+                    if (dist < 35 && time > enemy.nextShoot) {
+                        const hitChance = AI_DIFFICULTY * 0.08; // 難度 10 時命中率 80%
+                        if (Math.random() < hitChance) {
+                            health -= 5 + AI_DIFFICULTY;
+                            updateHUD();
+                            if (health <= 0) {
+                                alert("你被 AI 擊殺！");
+                                camera.position.set(0, 5, 0);
+                                health = maxHealth;
+                                updateHUD();
+                            }
+                        }
+                        enemy.nextShoot = time + (2000 - AI_DIFFICULTY * 150); // 難度越高射擊間隔越短
+                    }
+                });
+            }
+
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+
+        updateHUD();
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
